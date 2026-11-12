@@ -3256,29 +3256,63 @@ function gLoadLib(){
   if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
   return new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.onload = () => res(); s.onerror = () => rej(new Error('구글 로그인 모듈을 불러오지 못했어요. 인터넷 연결을 확인해 주세요.')); document.head.appendChild(s); });
 }
-// 사용자가 버튼을 누를 때만 호출 (팝업 차단 방지)
+// 토큰 클라이언트는 한 번만 만들어 둠: 클릭 순간에 바로 요청해야 팝업이 막히지 않음
+let gPend = null;
+const GTOK = GKEY + '-tok';
+function gKeepTok(){ try{ if (Gs.token) localStorage.setItem(GTOK, JSON.stringify({t:Gs.token, e:Gs.exp})); else localStorage.removeItem(GTOK); }catch(e){} }
+function gRestoreTok(){ try{ const o = JSON.parse(localStorage.getItem(GTOK)||'null'); if (o && o.t && o.e > Date.now() + 60000){ Gs.token = o.t; Gs.exp = o.e; } }catch(e){} }
+function gClient(){
+  if (Gs.client) return Gs.client;
+  Gs.client = google.accounts.oauth2.initTokenClient({ client_id: gcid(), scope: GSCOPE,
+    callback: async r => { const done = gPend; gPend = null; const fin = v => { gBtn(); if (done) done(v); };
+      if (r.error){ Gs.err = r.error; return fin(false); }
+      if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, 'https://www.googleapis.com/auth/drive.file')){ Gs.err = 'scope'; fin(false); await ask('구글 로그인 화면에서 「Google 드라이브」 권한 체크가 빠져 있었어요.\n다시 로그인하면서 「이 앱에서 사용하는 Google Drive 파일만 보기, 수정, 생성, 삭제」 항목을 꼭 체크해 주세요.', {ok:'확인'}); return; }
+      Gs.token = r.access_token; Gs.exp = Date.now() + (Number(r.expires_in)||3600)*1000 - 60000; Gs.err = ''; gKeepTok();
+      if (!gcfg.email){ try{ const u = await gFetch('https://www.googleapis.com/oauth2/v3/userinfo'); gcfg.email = (await u.json()).email || ''; }catch(e){} }
+      gcfg.on = true; gSaveCfg(); fin(true); },
+    error_callback: e => { const done = gPend; gPend = null; Gs.err = (e && e.type) || 'popup'; gBtn(); if (done) done(false); } });
+  return Gs.client;
+}
+// 반드시 클릭 같은 사용자 동작 안에서 동기적으로 호출
+function gRequest(silent){
+  return new Promise(res => {
+    if (gPend) { res(false); return; }
+    gPend = res;
+    try{ gClient().requestAccessToken({ prompt: silent && gcfg.email && Gs.err !== 'scope' ? '' : (gcfg.email && Gs.err !== 'scope' ? '' : 'consent'), login_hint: gcfg.email || undefined }); }
+    catch(e){ gPend = null; res(false); }
+  });
+}
 async function gLogin(){
   if (!gWeb()) { await ask('구글 로그인은 인터넷 주소(https://…)로 연 작성기에서만 돼요.\n파일을 더블클릭해서 연 경우엔 사업단 공용 주소로 열어 주세요. 그 전까지는 「백업 저장」을 써 주세요.', {ok:'확인'}); return false; }
   if (!gcid()) { await ask('아직 구글 앱 등록(OAuth 클라이언트 ID)이 안 되어 있어요.\n「내 정보 설정」 맨 아래에 클라이언트 ID를 넣으면 로그인할 수 있어요.', {ok:'확인'}); return false; }
-  await gLoadLib();
-  return new Promise(res => {
-    Gs.client = google.accounts.oauth2.initTokenClient({ client_id: gcid(), scope: GSCOPE, prompt: gcfg.email && !Gs.err ? '' : 'consent', login_hint: gcfg.email || undefined,
-      callback: async r => { if (r.error){ Gs.err = r.error; gBtn(); res(false); return; }
-        if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, 'https://www.googleapis.com/auth/drive.file')){ Gs.err = 'scope'; gBtn(); await ask('구글 로그인 화면에서 「Google 드라이브」 권한 체크가 빠져 있었어요.\n다시 로그인하면서 「이 앱에서 사용하는 Google Drive 파일만 보기, 수정, 생성, 삭제」 항목을 꼭 체크해 주세요.', {ok:'확인'}); res(false); return; }
-        Gs.token = r.access_token; Gs.exp = Date.now() + (Number(r.expires_in)||3600)*1000 - 60000; Gs.err = '';
-        if (!gcfg.email){ try{ const u = await gFetch('https://www.googleapis.com/oauth2/v3/userinfo'); gcfg.email = (await u.json()).email || ''; }catch(e){} }
-        gcfg.on = true; gSaveCfg(); gBtn(); res(true); },
-      error_callback: e => { Gs.err = (e && e.type) || 'popup'; gBtn(); res(false); } });
-    Gs.client.requestAccessToken();
-  });
+  if (!(window.google && google.accounts && google.accounts.oauth2)) { await gLoadLib(); toast('구글 로그인 준비가 됐어요. 버튼을 한 번 더 눌러 주세요.'); return false; }
+  return gRequest(false);
+}
+// 연결을 켜 둔 사람: 연결이 끊겼거나 곧 끊길 때, 화면 아무 곳이나 누르는 순간 조용히 다시 이어 줌
+let gLastSilent = 0;
+document.addEventListener('pointerdown', e => {
+  if (!gcfg.on || Gs.busy || gPend || !(window.google && google.accounts && google.accounts.oauth2)) return;
+  if (e.target && e.target.closest && e.target.closest('#btnCloud')) return;
+  if (Gs.token && Date.now() < Gs.exp - 5*60000) return;
+  if (Date.now() - gLastSilent < 60000) return;
+  gLastSilent = Date.now();
+  gRequest(true).then(ok => { if (ok) gSync('typing'); });
+}, true);
+// 페이지를 열 때: 남아 있는 토큰(1시간 이내)이 있으면 바로 이어서 동기화, 로그인 모듈은 미리 불러 둠
+function gBoot(){
+  if (!gWeb() || !gcid()) return;
+  gLoadLib().then(() => { try{ gClient(); }catch(e){} }).catch(() => {});
+  if (!gcfg.on) return;
+  gRestoreTok(); gBtn();
+  if (gOn()) gSync('login');
 }
 async function gFetch(url, o={}){
   const r = await fetch(url, {...o, headers:{...(o.headers||{}), Authorization:'Bearer '+Gs.token}});
-  if (r.status === 401){ Gs.token = null; gBtn(); throw new Error('로그인이 만료됐어요. 「☁ 다시 연결」을 눌러 주세요.'); }
+  if (r.status === 401){ Gs.token = null; gKeepTok(); gBtn(); throw new Error('로그인이 만료됐어요. 「☁ 다시 연결」을 눌러 주세요.'); }
   if (!r.ok){
     let why = ''; try{ const j = await r.json(); const e = (j.error && j.error.errors && j.error.errors[0]) || {}; why = e.reason || (j.error && j.error.status) || ''; }catch(e){}
     if (/accessNotConfigured|SERVICE_DISABLED/i.test(why)) throw new Error('구글 클라우드에서 「Google Drive API」가 꺼져 있어요. 관리자가 API 라이브러리에서 「사용」을 눌러야 해요. (403 accessNotConfigured)');
-    if (/insufficientPermissions|PERMISSION_DENIED|insufficient/i.test(why)) { Gs.token = null; gBtn(); throw new Error('구글 로그인 때 「Google 드라이브」 권한 체크가 빠졌어요. 「☁ 다시 연결」을 누르고 드라이브 항목을 체크해 주세요. (403 '+why+')'); }
+    if (/insufficientPermissions|PERMISSION_DENIED|insufficient/i.test(why)) { Gs.token = null; Gs.err = 'scope'; gKeepTok(); gBtn(); throw new Error('구글 로그인 때 「Google 드라이브」 권한 체크가 빠졌어요. 「☁ 다시 연결」을 누르고 드라이브 항목을 체크해 주세요. (403 '+why+')'); }
     throw new Error('구글 드라이브 응답 오류 ('+r.status+(why ? ' '+why : '')+')');
   }
   return r;
@@ -3343,7 +3377,7 @@ document.getElementById('btnCloud').addEventListener('click', async () => {
 async function gLogout(){
   if (!(await ask('구글 연결을 끊을까요?\n이 컴퓨터의 작성 내용은 그대로 남고, 드라이브의 저장 파일도 지워지지 않아요.', {ok:'연결 끊기'}))) return;
   try{ if (Gs.token && window.google) google.accounts.oauth2.revoke(Gs.token, () => {}); }catch(e){}
-  Gs.token = null; gcfg = {cid: gcfg.cid}; gSaveCfg(); gBtn(); toast('구글 연결을 끊었어요.');
+  Gs.token = null; gKeepTok(); gcfg = {cid: gcfg.cid}; gSaveCfg(); gBtn(); toast('구글 연결을 끊었어요.');
 }
 function gSettingsHTML(){
   return `<fieldset style="margin-top:12px"><legend>구글 드라이브 동기화</legend>
@@ -3357,7 +3391,7 @@ function gSettingsBind(){
 }
 gBtn();
 
-load(); render(); gBtn();
+load(); render(); gBtn(); gBoot();
 })();
 </script>
 </body>
