@@ -1991,16 +1991,12 @@ label.f textarea{min-height:64px;resize:vertical;line-height:1.5}
     if (kind === 'event' && p.dateStart) it('일시', fmtPeriod(p));
     if (p.place) it(sub.placeLabel, p.place);
     it(kind === 'work' ? '공사기간' : '사업기간', svcPeriod(proj));
-    const tot = svcTotal(proj), dr = dirRows(proj), dTot = sumRows(dr);
-    if (dTot) {
-      it('총사업비', wonKr(tot + dTot));
-      b.push(P('ind2', `- ${svcWord(proj)} 계약 : ${wonKr(tot)}${kind === 'work' ? ' VAT포함' : ''}`));
-      { const nm = dr.map(r => r.item || r.semok).filter(Boolean); b.push(P('ind2', `- 직접 지급${nm.length ? `(${nm.slice(0, 3).join(', ')}${nm.length > 3 ? ' 등' : ''})` : ''} : ${wonKr(dTot)}`)); }
-    } else it('총사업비', tot ? wonKr(tot) + (kind === 'work' ? ' VAT포함' : '') : '');
+    const tot = svcTotal(proj) + sumRows(dirRows(proj));
+    it('총사업비', tot ? wonKr(tot) + (kind === 'work' ? ' VAT포함' : '') : '');
     const cl = lines(p.contents);
     if (cl.length) { it(sub.contentsLabel, cl.length === 1 ? cl[0] : ''); if (cl.length > 1) cl.forEach(x => b.push(P('ind2', `- ${x.replace(/^[-·•]\s*/, '')}`))); }
-    if (conRows(proj).some(r => r.item || r.price)) { b.push(P('ind1', `${KO[k++]}. ${label(kind === 'work' ? '세부내역' : '견적내역')}`)); b.push(svcEstTable(conRows(proj))); }
-    if (dr.length) { b.push(P('ind1', `${KO[k++]}. ${label('직접 지급 내역')} (${svcWord(proj)} 계약 제외)`)); b.push(svcEstTable(dr, '합계')); }
+    // 계획(안)에는 모든 줄을 한 표로: 산단 계약에서 빠지는 줄은 비고에 「직접 지급」만 적음
+    if ((p.budget || []).some(r => r.item || r.price)) { b.push(P('ind1', `${KO[k++]}. ${label(kind === 'work' ? '세부내역' : '견적내역')}`)); b.push(svcEstTable((p.budget || []).map(r => isDirect(r) ? { ...r, note: r.note ? `${r.note}, 직접 지급` : '직접 지급' } : r))); }
     it('계약방법', m.method || (kind === 'work' ? '수의계약을 통한 공사계약' : `수의계약을 통한 ${SUB[proj.sub].kind} 용역`));
     if (m.law) b.push(P('ind2', `* ${m.law}`));
     vendorItems(b, proj, k++);
@@ -2504,7 +2500,7 @@ function budgetEditor(rows, key){
     <div class="bl1"><select data-b="h" aria-label="사업비 항목">${opts(items, r.h, '사업비 항목')}</select><select data-b="bimok" aria-label="보조비목">${opts(bms, r.bimok, '보조비목')}</select><select data-b="semok" aria-label="보조세목">${opts(sms, r.semok, '보조세목')}</select></div>
     <div class="bl0"><input data-b="item" value="${esc(r.item)}" placeholder="${key==='plan'&&C.isGoods(cur())?'품명 (예: 슬립매입평판등)':'내용 (예: X배너 및 디자인비)'}" aria-label="내용">${key==='plan'&&C.isGoods(cur())?`<input data-b="spec" value="${esc(r.spec||'')}" placeholder="규격 (예: 1200x300 / 50w / 5700k)" aria-label="규격" style="margin-top:4px">`:''}</div>
     <div class="bl2"><input data-b="price" inputmode="numeric" value="${esc(r.price)}" placeholder="단가(원)" aria-label="단가"><span>×</span><input data-b="qty" inputmode="numeric" value="${esc(r.qty)}" placeholder="수량" aria-label="수량"><input data-b="unit" value="${esc(r.unit)}" placeholder="단위" aria-label="단위"><span class="amt">${C.won(C.rowAmt(r))}원</span><button class="btn sm" data-del="${i}" title="행 삭제" aria-label="행 삭제">×</button></div>
-    ${key==='plan'&&C.isSvc(cur()) ? `<label class="bdir"><input type="checkbox" data-b="direct" ${C.isDirect(r)?'checked':''}>직접 지급 (용역 계약에서 빼기 · 강사료·여비 등 학교가 바로 지급)</label>` : ''}
+    ${key==='plan'&&C.isSvc(cur()) ? `<label class="bdir"><input type="checkbox" data-b="direct" ${C.isDirect(r)?'checked':''}>직접 지급 (산단 계약 요청에서 빼기 · 비고에 「직접 지급」 표시)</label>` : ''}
     ${key==='result' ? `<div class="bl3"><span class="pays">${[['card','카드'],['tax','전자세금계산서'],['etc','기타']].map(([v,l])=>`<label><input type="radio" name="pay-${i}" data-b="pay" value="${v}" ${r.pay===v?'checked':''}>${l}</label>`).join('')}</span><input type="date" data-b="date" value="${esc(r.date||'')}" aria-label="사용일" title="사용일"><input data-b="spent" inputmode="numeric" value="${esc(r.spent==null?'':r.spent)}" placeholder="실사용액 (비우면 단가×수량)" aria-label="실사용액"></div>` : ''}
   </div>`;}).join('')}</div><div class="total"><button class="btn sm" data-add="${key}">+ 행 추가</button><span>합계 ${C.won(C.sumRows(rows))}원</span></div>`;
 }
@@ -2562,7 +2558,7 @@ function render(){
       ${fld(pl,'contents',sub.contentsLabel+' (한 줄에 하나씩)',{type:'textarea',ph:p.sub==='meeting'?'예:\n운영규정 변경의 건\n센터별 예산변경 협의':''})}
       ${p.sub==='meeting' ? `<div class="hint">참석자 명단은 ② ${C.attWord(p)} 탭에서 넣어요. 명단을 넣으면 기안문의 참석자 줄이 「총 14명 (위원장 1명, 내부위원 5명 …)」처럼 자동으로 바뀌어요.</div>` : ''}
     </fieldset>`}
-    <fieldset><legend>예산 세부내역</legend>${budgetEditor(pl.budget,'plan')}<div class="hint">금액은 단가 × 수량으로 계산되고, 한글 금액(금일십삼만원정)도 자동으로 들어가요.${sub.svc?' 「직접 지급」에 체크한 줄은 산단 협조전·계약 체결 보고·과업지시서·착수계·완료계의 계약금액과 산출내역에서 빠지고, 계획(안)에는 총사업비 아래 「용역 계약 / 직접 지급」으로 나눠 적혀요. 여비·인건비·업무추진비 줄은 처음부터 직접 지급으로 잡혀요.':''}</div></fieldset>`;
+    <fieldset><legend>예산 세부내역</legend>${budgetEditor(pl.budget,'plan')}<div class="hint">금액은 단가 × 수량으로 계산되고, 한글 금액(금일십삼만원정)도 자동으로 들어가요.${sub.svc?' 「직접 지급」에 체크한 줄은 계획(안) 견적내역 표의 비고에 「직접 지급」으로 적히고, 산단 협조전·계약 체결 보고·과업지시서·착수계·완료계의 계약금액과 산출내역에서는 빠져요. 여비·인건비·업무추진비 줄은 처음부터 직접 지급으로 잡혀요.':''}</div></fieldset>`;
   }
   if (sub.svc) form += svcForms(p, view);
   if (p.sub==='field' || (p.sub==='lecture' && ['fexp','fcv','frep'].includes(view))) form += fieldForms(p, view);
